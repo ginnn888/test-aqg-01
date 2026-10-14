@@ -1,0 +1,13 @@
+{
+  "installationVersion": 2,
+  "repository": "ginnn888/test-aqg-01",
+  "branch": "codex/v2-acceptance-base",
+  "coverageThreshold": 80,
+  "geminiConsent": true,
+  "testMode": "standalone",
+  "frameworks": [
+    "jest"
+  ],
+  "engine": "marketplace-action",
+  "actionRef": "e0ad92125dbd7187e47cc2af3ecdd9813dc527ef"
+}
