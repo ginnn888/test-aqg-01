@@ -1,0 +1,8 @@
+{
+  "installationVersion": 2,
+  "repository": "ginnn888/test-aqg-01",
+  "branch": "main",
+  "coverageThreshold": 80,
+  "geminiConsent": true,
+  "testMode": "standalone"
+}

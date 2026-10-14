@@ -1,0 +1,122 @@
+name: Quality Gate
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    branches: ["main"]
+permissions: {}
+concurrency:
+  group: quality-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  ai:
+    if: github.repository == 'ginnn888/test-aqg-01' && github.event.repository.private == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node .quality-gate/ai.cjs
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.8-flash' }}
+          GITHUB_TOKEN: ${{ github.token }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quality-ai-${{ github.run_id }}
+          path: quality-output/
+          retention-days: 14
+  tests:
+    needs: ai
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: quality-ai-${{ github.run_id }}
+          path: generated
+      - name: Copy AI-generated tests as untrusted code
+        run: |
+          mkdir -p Test
+          if [ -d generated/Test ]; then cp generated/Test/*.test.js Test/; fi
+      - run: npm ci
+      - name: Jest tests (no Gemini key or write token)
+        run: npm test -- --runInBand --coverage --coverageReporters=json-summary --coverageReporters=lcov --json --outputFile=test-results.json
+      - name: Dependency security gate
+        run: npm audit --audit-level=high
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quality-metrics-${{ github.run_id }}
+          path: |
+            coverage/coverage-summary.json
+            test-results.json
+          if-no-files-found: warn
+          retention-days: 14
+  quality-gate:
+    name: Quality Gate
+    needs: [ai, tests]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+      statuses: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: quality-ai-${{ github.run_id }}
+          path: ai
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: quality-metrics-${{ github.run_id }}
+          path: metrics
+      - id: evaluate
+        continue-on-error: true
+        run: node .quality-gate/report.cjs
+        env:
+          AI_STATUS: ${{ needs.ai.result }}
+          TEST_STATUS: ${{ needs.tests.result }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quality-gate-report
+          path: quality-report/quality-gate-report.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Post PR result using trusted base script
+        if: always()
+        run: node .quality-gate/comment.cjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Enforce result
+        if: always()
+        run: test "${{ steps.evaluate.outcome }}" = "success"
