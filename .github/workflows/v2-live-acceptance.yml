@@ -1,0 +1,154 @@
+name: Action v2 live Gemini acceptance
+'on':
+  push:
+    branches:
+      - codex/v2-live-acceptance
+permissions: {}
+concurrency:
+  group: 'v2-live-${{ github.ref }}'
+  cancel-in-progress: true
+jobs:
+  ai:
+    if: github.event.repository.private == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      skipped: '${{ steps.generate.outputs.skipped }}'
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: NonnaritRammaneekultawat-6609650459/test-github-marketplace
+          ref: e0ad92125dbd7187e47cc2af3ecdd9813dc527ef
+          path: engine
+          persist-credentials: false
+      - id: generate
+        run: node engine/tests/live-action.cjs generate
+        env:
+          INPUT_ACTION_REF: e0ad92125dbd7187e47cc2af3ecdd9813dc527ef
+          INPUT_MODE: generate
+          INPUT_GEMINI_API_KEY: '${{ secrets.GEMINI_API_KEY }}'
+          INPUT_GEMINI_MODEL: '${{ vars.GEMINI_MODEL || ''gemini-3.1-flash-lite'' }}'
+          INPUT_GITHUB_TOKEN: '${{ github.token }}'
+          INPUT_OUTPUT_PATH: quality-output
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 'quality-ai-${{ github.run_id }}'
+          path: quality-output/
+          retention-days: 14
+  tests:
+    needs: ai
+    if: needs.ai.outputs.skipped != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: NonnaritRammaneekultawat-6609650459/test-github-marketplace
+          ref: e0ad92125dbd7187e47cc2af3ecdd9813dc527ef
+          path: engine
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: '${{ github.sha }}'
+          repository: '${{ github.repository }}'
+          path: project
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '${{ vars.QUALITY_GATE_JAVA_VERSION || ''21'' }}'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '${{ vars.QUALITY_GATE_GRADLE_VERSION || ''8.14'' }}'
+      - uses: actions/download-artifact@v4
+        with:
+          name: 'quality-ai-${{ github.run_id }}'
+          path: ai
+      - name: 'Install project npm dependencies, when present'
+        working-directory: project
+        run: 'if [ -f package.json ]; then npm ci --ignore-scripts; fi'
+      - name: Run isolated framework tests
+        run: node engine/runner.cjs project ai metrics
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: 'quality-metrics-${{ github.run_id }}'
+          path: metrics/
+          if-no-files-found: warn
+          retention-days: 14
+  quality-gate:
+    name: Quality Gate
+    needs:
+      - ai
+      - tests
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+      statuses: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: NonnaritRammaneekultawat-6609650459/test-github-marketplace
+          ref: e0ad92125dbd7187e47cc2af3ecdd9813dc527ef
+          path: engine
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/v2-acceptance-base
+          path: project
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: 'quality-ai-${{ github.run_id }}'
+          path: ai
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: 'quality-metrics-${{ github.run_id }}'
+          path: metrics
+      - name: Use trusted Sonar configuration if present
+        run: |
+          if [ -f project/sonar-project.properties ]; then cp project/sonar-project.properties sonar-project.properties; fi
+      - id: evaluate
+        continue-on-error: true
+        run: node engine/tests/live-action.cjs report
+        env:
+          INPUT_ACTION_REF: e0ad92125dbd7187e47cc2af3ecdd9813dc527ef
+          INPUT_MODE: report
+          INPUT_GEMINI_API_KEY: '${{ secrets.GEMINI_API_KEY }}'
+          INPUT_SONAR_TOKEN: '${{ secrets.SONAR_TOKEN }}'
+          INPUT_GITHUB_TOKEN: '${{ github.token }}'
+          INPUT_GEMINI_MODEL: '${{ vars.GEMINI_MODEL || ''gemini-3.1-flash-lite'' }}'
+          INPUT_AI_STATUS: '${{ needs.ai.result }}'
+          INPUT_TESTS_STATUS: '${{ needs.tests.result }}'
+          INPUT_STATE_PATH: ai/action-state.json
+          INPUT_METRICS_PATH: metrics
+          INPUT_OUTPUT_PATH: quality-report
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quality-gate-report
+          path: quality-report/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Enforce result
+        if: always()
+        env:
+          RESULT: '${{ steps.evaluate.outcome }}'
+        run: test "$RESULT" = success
+env:
+  ACCEPTANCE_PR: '3'
