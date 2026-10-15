@@ -1,0 +1,11 @@
+{
+  "name": "quality-gate-standalone",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "jest --config .quality-gate/standalone-jest.cjs"
+  },
+  "devDependencies": {
+    "jest": "30.5.2"
+  }
+}
