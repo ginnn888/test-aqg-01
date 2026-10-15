@@ -1,11 +1,10 @@
 {
-  "name": "quality-gate-standalone",
-  "version": "1.0.0",
+  "name": "quality-gate-angularjs-fixture",
   "private": true,
-  "scripts": {
-    "test": "jest --config .quality-gate/standalone-jest.cjs"
-  },
+  "scripts": { "test:gate": "karma start karma.conf.cjs --single-run" },
   "devDependencies": {
-    "jest": "30.5.2"
+    "angular": "1.8.3", "angular-mocks": "1.8.3", "jasmine-core": "5.6.0",
+    "karma": "6.4.4", "karma-chrome-launcher": "3.2.0", "karma-jasmine": "5.1.0",
+    "karma-coverage": "2.2.1", "karma-junit-reporter": "2.0.1"
   }
 }
