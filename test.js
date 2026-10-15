@@ -54,3 +54,9 @@ function modulo(a, b) {
   // Normalize -0 to 0
   return Object.is(result, -0) ? 0 : result;
 }
+// Validation added only on the isolated acceptance branch.
+function validateNumbers(...values) {
+  if (values.some(value => typeof value !== 'number' || !Number.isFinite(value))) {
+    throw new TypeError('Inputs must be finite numbers');
+  }
+}
