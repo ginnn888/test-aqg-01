@@ -1,0 +1,207 @@
+name: Quality Gate
+on:
+  pull_request_target:
+    types: [opened, reopened, closed]
+    branches: ["main"]
+  workflow_run:
+    workflows: ["Quality Gate · Open PR"]
+    types: [completed]
+permissions: {}
+concurrency:
+  group: quality-gate-${{ github.event.pull_request.number || github.event.workflow_run.head_branch || github.ref }}
+  cancel-in-progress: true
+jobs:
+  context:
+    if: github.event.repository.private == false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    outputs:
+      pr: ${{ steps.resolve.outputs.pr }}
+      head: ${{ steps.resolve.outputs.head }}
+      base: ${{ steps.resolve.outputs.base }}
+      source: ${{ steps.resolve.outputs.source }}
+    steps:
+      - id: resolve
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            let pr;
+            if (context.eventName === 'workflow_run') {
+              const run = context.payload.workflow_run;
+              if (run.conclusion !== 'success' || run.head_repository?.id !== context.payload.repository.id || run.path?.split('@')[0] !== '.github/workflows/quality-gate-open-pr.yml') return;
+              const result = await github.rest.pulls.list({owner, repo, state:'open', base:"main", head:owner+':'+run.head_branch, per_page:100});
+              pr = result.data.find(item => item.head.sha === run.head_sha && item.head.repo?.id === context.payload.repository.id);
+            } else {
+              if (context.payload.action === 'closed' && !context.payload.pull_request.merged) return;
+              pr = (await github.rest.pulls.get({owner,repo,pull_number:context.payload.pull_request.number})).data;
+            }
+            if (!pr || pr.base.ref !== "main" || pr.head.ref.startsWith('quality-gate/install-') || pr.head.repo?.private !== false) return;
+            core.setOutput('pr',String(pr.number));core.setOutput('head',pr.head.sha);core.setOutput('base',pr.base.sha);core.setOutput('source',pr.head.repo.full_name);
+  ai:
+    needs: context
+    if: needs.context.outputs.pr != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      skipped: ${{ steps.generate.outputs.skipped }}
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Load verified PR context for Action
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ needs.context.outputs.pr }}
+          EXPECTED_HEAD: ${{ needs.context.outputs.head }}
+          EXPECTED_BASE: ${{ needs.context.outputs.base }}
+        with:
+          script: |
+            const pr = (await github.rest.pulls.get({...context.repo,pull_number:Number(process.env.PR_NUMBER)})).data;
+            if(pr.head.sha !== process.env.EXPECTED_HEAD || pr.base.sha !== process.env.EXPECTED_BASE || pr.head.repo?.private !== false) throw new Error('PR changed; push again or rerun the workflow');
+            require('node:fs').writeFileSync(process.env.GITHUB_EVENT_PATH,JSON.stringify({repository:context.payload.repository,pull_request:pr}));
+      - uses: actions/checkout@v4
+        with:
+          repository: NonnaritRammaneekultawat-6609650459/test-github-marketplace
+          ref: 898f96e76a8b6b0db35f53fa0dac48ac3df7ae0e
+          path: engine
+          persist-credentials: false
+      - id: generate
+        uses: NonnaritRammaneekultawat-6609650459/test-github-marketplace@898f96e76a8b6b0db35f53fa0dac48ac3df7ae0e
+        with:
+          action_ref: 898f96e76a8b6b0db35f53fa0dac48ac3df7ae0e
+          mode: generate
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          gemini_model: ${{ vars.GEMINI_MODEL || 'gemini-3.1-flash-lite' }}
+          github_token: ${{ github.token }}
+          output_path: quality-output
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quality-ai-${{ github.run_id }}
+          path: quality-output/
+          retention-days: 14
+  tests:
+    needs: [context, ai]
+    if: needs.ai.result == 'success' && needs.ai.outputs.skipped != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: NonnaritRammaneekultawat-6609650459/test-github-marketplace
+          ref: 898f96e76a8b6b0db35f53fa0dac48ac3df7ae0e
+          path: engine
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.context.outputs.head }}
+          repository: ${{ needs.context.outputs.source }}
+          path: project
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ vars.QUALITY_GATE_JAVA_VERSION || '21' }}
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ vars.QUALITY_GATE_GRADLE_VERSION || '8.14' }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: quality-ai-${{ github.run_id }}
+          path: ai
+      - name: Install project npm dependencies, when present
+        working-directory: project
+        run: |
+          if [ -f package.json ]; then npm ci --ignore-scripts; fi
+      - name: Run isolated framework tests
+        run: node engine/runner.cjs project ai metrics
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quality-metrics-${{ github.run_id }}
+          path: metrics/
+          if-no-files-found: warn
+          retention-days: 14
+  quality-gate:
+    name: Quality Gate
+    needs: [context, ai, tests]
+    if: always() && needs.context.outputs.pr != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+      statuses: write
+    steps:
+      - name: Load verified PR context for Action
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ needs.context.outputs.pr }}
+          EXPECTED_HEAD: ${{ needs.context.outputs.head }}
+          EXPECTED_BASE: ${{ needs.context.outputs.base }}
+        with:
+          script: |
+            const pr = (await github.rest.pulls.get({...context.repo,pull_number:Number(process.env.PR_NUMBER)})).data;
+            if(pr.head.sha !== process.env.EXPECTED_HEAD || pr.base.sha !== process.env.EXPECTED_BASE || pr.head.repo?.private !== false) throw new Error('PR changed; push again or rerun the workflow');
+            require('node:fs').writeFileSync(process.env.GITHUB_EVENT_PATH,JSON.stringify({repository:context.payload.repository,pull_request:pr}));
+      - uses: actions/checkout@v4
+        with:
+          repository: NonnaritRammaneekultawat-6609650459/test-github-marketplace
+          ref: 898f96e76a8b6b0db35f53fa0dac48ac3df7ae0e
+          path: engine
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.context.outputs.base }}
+          path: project
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: quality-ai-${{ github.run_id }}
+          path: ai
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: quality-metrics-${{ github.run_id }}
+          path: metrics
+      - name: Use trusted Sonar configuration if present
+        run: |
+          if [ -f project/sonar-project.properties ]; then cp project/sonar-project.properties sonar-project.properties; fi
+      - id: evaluate
+        continue-on-error: true
+        uses: NonnaritRammaneekultawat-6609650459/test-github-marketplace@898f96e76a8b6b0db35f53fa0dac48ac3df7ae0e
+        with:
+          action_ref: 898f96e76a8b6b0db35f53fa0dac48ac3df7ae0e
+          mode: report
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          sonar_token: ${{ secrets.SONAR_TOKEN }}
+          github_token: ${{ github.token }}
+          gemini_model: ${{ vars.GEMINI_MODEL || 'gemini-3.1-flash-lite' }}
+          ai_status: ${{ needs.ai.result }}
+          tests_status: ${{ needs.tests.result }}
+          state_path: ai/action-state.json
+          metrics_path: metrics
+          output_path: quality-report
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quality-gate-report
+          path: quality-report/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Enforce result
+        if: always()
+        env:
+          RESULT: ${{ steps.evaluate.outcome }}
+        run: test "$RESULT" = success
