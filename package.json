@@ -1,0 +1,11 @@
+{
+  "name": "quality-gate-project",
+  "version": "1.0.0",
+  "private": true,
+  "devDependencies": {
+    "jest": "30.5.2"
+  },
+  "scripts": {
+    "test": "jest --coverage"
+  }
+}
