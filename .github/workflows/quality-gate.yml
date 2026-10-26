@@ -30,7 +30,7 @@ jobs:
           phase: generate
           gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
           github_token: ${{ github.token }}
-          ai_timeout_seconds: "90"
+          ai_timeout_seconds: "180"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
