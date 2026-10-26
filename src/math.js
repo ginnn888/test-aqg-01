@@ -2,7 +2,7 @@
 function add(a, b) {
   validateNumbers(a, b);
   const result = a + b;
-  return Object.is(result, -0) ? 0 : result;
+  return result;
 }
 
 function subtract(a, b) {
